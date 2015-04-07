@@ -55,7 +55,6 @@ static pthread_key_t current_jni_env;
 static JavaVM *java_vm;
 static jfieldID custom_data_field_id;
 static jmethodID set_message_method_id;
-static jmethodID set_current_position_method_id;
 static jmethodID on_gstreamer_initialized_method_id;
 static jmethodID on_media_size_changed_method_id;
 
@@ -112,16 +111,6 @@ static void set_ui_message (const gchar *message, CustomData *data) {
   (*env)->DeleteLocalRef (env, jmessage);
 }
 
-/* Tell the application what is the current position and clip duration */
-static void set_current_ui_position (gint position, gint duration, CustomData *data) {
-  JNIEnv *env = get_jni_env ();
-  (*env)->CallVoidMethod (env, data->app, set_current_position_method_id, position, duration);
-  if ((*env)->ExceptionCheck (env)) {
-    GST_ERROR ("Failed to call Java method");
-    (*env)->ExceptionClear (env);
-  }
-}
-
 /* If we have pipeline and it is running, query the current position and clip duration and inform
  * the application */
 static gboolean refresh_ui (CustomData *data) {
@@ -145,8 +134,6 @@ static gboolean refresh_ui (CustomData *data) {
     position = 0;
   }
 
-  /* Java expects these values in milliseconds, and GStreamer provides nanoseconds */
-  set_current_ui_position (position / GST_MSECOND, data->duration / GST_MSECOND, data);
   return TRUE;
 }
 
@@ -261,7 +248,8 @@ static void check_media_size (CustomData *data) {
   GstVideoInfo info;
 
   /* Retrieve the Caps at the entrance of the video sink */
-  g_object_get (data->pipeline, "video-sink", &video_sink, NULL);
+  video_sink = gst_bin_get_by_name (GST_BIN(data->pipeline), "glimagesink0");
+
   video_sink_pad = gst_element_get_static_pad (video_sink, "sink");
   caps = gst_pad_get_current_caps (video_sink_pad);
 
@@ -312,7 +300,10 @@ static void check_initialization_complete (CustomData *data) {
     GST_DEBUG ("Initialization complete, notifying application. native_window:%p main_loop:%p", data->native_window, data->main_loop);
 
     /* The main loop is running and we received a native window, inform the sink about it */
-    gst_video_overlay_set_window_handle (GST_VIDEO_OVERLAY (data->pipeline), (guintptr)data->native_window);
+    
+    GstElement * sink = gst_bin_get_by_name (GST_BIN(data->pipeline), "glimagesink0");
+    
+    gst_video_overlay_set_window_handle (GST_VIDEO_OVERLAY (sink), (guintptr)data->native_window);
 
     (*env)->CallVoidMethod (env, data->app, on_gstreamer_initialized_method_id);
     if ((*env)->ExceptionCheck (env)) {
@@ -340,7 +331,8 @@ static void *app_function (void *userdata) {
   g_main_context_push_thread_default(data->context);
 
   /* Build pipeline */
-  data->pipeline = gst_parse_launch("playbin", &error);
+  //data->pipeline = gst_parse_launch("videotestsrc ! gltransformation ! textoverlay text=foo ! glimagesink", &error);
+  data->pipeline = gst_parse_launch("videotestsrc ! gltransformation ! glimagesink", &error);
   if (error) {
     gchar *message = g_strdup_printf("Unable to build pipeline: %s", error->message);
     g_clear_error (&error);
@@ -431,20 +423,6 @@ static void gst_native_finalize (JNIEnv* env, jobject thiz) {
   GST_DEBUG ("Done finalizing");
 }
 
-/* Set playbin2's URI */
-void gst_native_set_uri (JNIEnv* env, jobject thiz, jstring uri) {
-  CustomData *data = GET_CUSTOM_DATA (env, thiz, custom_data_field_id);
-  if (!data || !data->pipeline) return;
-  const jbyte *char_uri = (*env)->GetStringUTFChars (env, uri, NULL);
-  GST_DEBUG ("Setting URI to %s", char_uri);
-  if (data->target_state >= GST_STATE_READY)
-    gst_element_set_state (data->pipeline, GST_STATE_READY);
-  g_object_set(data->pipeline, "uri", char_uri, NULL);
-  (*env)->ReleaseStringUTFChars (env, uri, char_uri);
-  data->duration = GST_CLOCK_TIME_NONE;
-  data->is_live = (gst_element_set_state (data->pipeline, data->target_state) == GST_STATE_CHANGE_NO_PREROLL);
-}
-
 /* Set pipeline to PLAYING state */
 static void gst_native_play (JNIEnv* env, jobject thiz) {
   CustomData *data = GET_CUSTOM_DATA (env, thiz, custom_data_field_id);
@@ -463,29 +441,33 @@ static void gst_native_pause (JNIEnv* env, jobject thiz) {
   data->is_live = (gst_element_set_state (data->pipeline, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL);
 }
 
-/* Instruct the pipeline to seek to a different position */
-void gst_native_set_position (JNIEnv* env, jobject thiz, int milliseconds) {
+/* Set pipeline to READY state */
+static void gst_native_ready (JNIEnv* env, jobject thiz) {
   CustomData *data = GET_CUSTOM_DATA (env, thiz, custom_data_field_id);
   if (!data) return;
-  gint64 desired_position = (gint64)(milliseconds * GST_MSECOND);
-  if (data->state >= GST_STATE_PAUSED) {
-    execute_seek(desired_position, data);
-  } else {
-    GST_DEBUG ("Scheduling seek to %" GST_TIME_FORMAT " for later", GST_TIME_ARGS (desired_position));
-    data->desired_position = desired_position;
-  }
+  GST_DEBUG ("Setting state to READY");
+  data->target_state = GST_STATE_READY;
+  data->is_live = (gst_element_set_state (data->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_NO_PREROLL);
+}
+
+/* Set pipeline to NULL state */
+static void gst_native_null (JNIEnv* env, jobject thiz) {
+  CustomData *data = GET_CUSTOM_DATA (env, thiz, custom_data_field_id);
+  if (!data) return;
+  GST_DEBUG ("Setting state to NULL");
+  data->target_state = GST_STATE_NULL;
+  data->is_live = (gst_element_set_state (data->pipeline, GST_STATE_NULL) == GST_STATE_CHANGE_NO_PREROLL);
 }
 
 /* Static class initializer: retrieve method and field IDs */
 static jboolean gst_native_class_init (JNIEnv* env, jclass klass) {
   custom_data_field_id = (*env)->GetFieldID (env, klass, "native_custom_data", "J");
   set_message_method_id = (*env)->GetMethodID (env, klass, "setMessage", "(Ljava/lang/String;)V");
-  set_current_position_method_id = (*env)->GetMethodID (env, klass, "setCurrentPosition", "(II)V");
   on_gstreamer_initialized_method_id = (*env)->GetMethodID (env, klass, "onGStreamerInitialized", "()V");
   on_media_size_changed_method_id = (*env)->GetMethodID (env, klass, "onMediaSizeChanged", "(II)V");
 
   if (!custom_data_field_id || !set_message_method_id || !on_gstreamer_initialized_method_id ||
-      !on_media_size_changed_method_id || !set_current_position_method_id) {
+      !on_media_size_changed_method_id) {
     /* We emit this message through the Android log instead of the GStreamer log because the later
      * has not been initialized yet.
      */
@@ -539,10 +521,10 @@ static void gst_native_surface_finalize (JNIEnv *env, jobject thiz) {
 static JNINativeMethod native_methods[] = {
   { "nativeInit", "()V", (void *) gst_native_init},
   { "nativeFinalize", "()V", (void *) gst_native_finalize},
-  { "nativeSetUri", "(Ljava/lang/String;)V", (void *) gst_native_set_uri},
   { "nativePlay", "()V", (void *) gst_native_play},
   { "nativePause", "()V", (void *) gst_native_pause},
-  { "nativeSetPosition", "(I)V", (void*) gst_native_set_position},
+  { "nativeNull", "()V", (void *) gst_native_null},
+  { "nativeReady", "()V", (void *) gst_native_ready},
   { "nativeSurfaceInit", "(Ljava/lang/Object;)V", (void *) gst_native_surface_init},
   { "nativeSurfaceFinalize", "()V", (void *) gst_native_surface_finalize},
   { "nativeClassInit", "()Z", (void *) gst_native_class_init}

@@ -2,7 +2,7 @@ apply plugin: 'com.android.application'
 
 android {
     compileSdkVersion 19
-    buildToolsVersion "21.0.0"
+    buildToolsVersion "22.0.1"
 
     sourceSets {
         main {
@@ -13,8 +13,8 @@ android {
 
     defaultConfig {
         applicationId "com.gst_sdk_tutorials.tutorial_5"
-        minSdkVersion 9
-        targetSdkVersion 14
+        minSdkVersion 19
+        targetSdkVersion 19
 
         ndk {
             moduleName "tutorial-5"
