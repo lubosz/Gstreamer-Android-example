@@ -331,8 +331,8 @@ static void *app_function (void *userdata) {
   g_main_context_push_thread_default(data->context);
 
   /* Build pipeline */
-  //data->pipeline = gst_parse_launch("videotestsrc ! gltransformation ! textoverlay text=foo ! glimagesink", &error);
-  data->pipeline = gst_parse_launch("videotestsrc ! gltransformation ! glimagesink", &error);
+  data->pipeline = gst_parse_launch("videotestsrc ! gltransformation ! textoverlay text=\"text1\" valignment=\"top\" font-desc=\"sans bold 30\" ! textoverlay text=\"text2\" halignment=\"right\" font-desc=\"sans bold 30\" ! textoverlay text=\"text3\" halignment=\"left\" font-desc=\"sans bold 30\" ! glimagesink", &error);
+  //data->pipeline = gst_parse_launch("videotestsrc ! gltransformation ! glimagesink", &error);
   if (error) {
     gchar *message = g_strdup_printf("Unable to build pipeline: %s", error->message);
     g_clear_error (&error);
